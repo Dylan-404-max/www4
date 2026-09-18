@@ -1,7 +1,7 @@
-// ==================== TimberPro v2.2 — Frontend ====================
+// ==================== TimberPro v2.3 — Frontend ====================
 
 const API_BASE_URL = (localStorage.getItem('api_base_url')) || 'https://timberpro-api.kobayashifgk.workers.dev';
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.3.0';
 const DB_NAME = 'TimberProDB';
 const DB_VERSION = 3;
 
@@ -21,6 +21,7 @@ let orderItems = {};
 let dbReady = false;
 let deferredInstallPrompt = null;
 let currentCharts = {};
+let _qtyModalCtx = { kind: null, id: null, isProduct: false };
 
 // ==================== OFFLINE DB ====================
 class OfflineDB {
@@ -394,8 +395,7 @@ function renderProductGrid() {
             : `<div class="product-stock service">Service</div>`;
 
         return `
-            <div class="product-card ${inCart ? 'in-cart' : ''}"
-                 ${inCart ? '' : `onclick="addProductToCart(${item.id}, '${entry.kind}')"`}>
+            <div class="product-card ${inCart ? 'in-cart' : ''}" onclick="openQuantityModal('${entry.kind}', ${item.id})">
                 <div class="product-icon">${isProduct ? '🪵' : '⚙️'}</div>
                 <div class="product-name">${escapeHtml(item.name)}</div>
                 <div class="product-price">${formatCurrency(item.price)}</div>
@@ -411,84 +411,209 @@ function renderProductGrid() {
     }).join('');
 }
 
-function addProductToCart(id, kind = 'product') {
-    const item = kind === 'product' ? products.find(x => x.id === id) : services.find(x => x.id === id);
-    if (!item) return;
-    const existing = cart.find(c => c.type === kind && c.id === id);
-    if (existing) {
-        if (kind === 'product' && existing.quantity + 1 > (item.stock || 0)) {
-            showToast(`Only ${item.stock} in stock`, 'warning'); return;
-        }
-        existing.quantity += 1;
-        afterCartChange(); return;
-    }
-    if (kind === 'product') {
-        if ((item.stock || 0) < 1) { showToast('Out of stock', 'error'); return; }
-        cart.push({ type: 'product', id, name: item.name, price: item.price, unit: item.unit || 'piece', stock: item.stock || 0, quantity: 1 });
-        afterCartChange();
-    } else {
-        openServicePriceModal(item);
-    }
-}
-
+// ---- Mini stepper on product cards ----
 function cartIncrement(type, id) {
     const item = cart.find(c => c.type === type && c.id === id);
     if (!item) return;
-    if (item.type === 'product' && item.stock && item.quantity + 1 > item.stock) {
-        showToast(`Only ${item.stock} in stock`, 'warning'); return;
+    const step = item.type === 'product' ? stepForUnit(item.unit) : 0.5;
+    const next = +(item.quantity + step).toFixed(3);
+    if (item.type === 'product' && item.stock && next > item.stock) {
+        showToast(`Only ${formatQty(item.stock)} in stock`, 'warning'); return;
     }
-    item.quantity += 1;
+    item.quantity = next;
     afterCartChange();
 }
-
 function cartDecrement(type, id) {
     const idx = cart.findIndex(c => c.type === type && c.id === id);
     if (idx === -1) return;
-    if (cart[idx].quantity <= 1) {
-        cart.splice(idx, 1);
-    } else {
-        cart[idx].quantity -= 1;
-    }
+    const step = cart[idx].type === 'product' ? stepForUnit(cart[idx].unit) : 0.5;
+    const next = +(cart[idx].quantity - step).toFixed(3);
+    if (next <= 0) cart.splice(idx, 1);
+    else cart[idx].quantity = next;
     afterCartChange();
 }
 
-function addServiceToCart(id) {
-    const s = services.find(x => x.id === id);
-    if (s) openServicePriceModal(s);
-}
+// ---- ⭐ QUANTITY PICKER MODAL ----
+function openQuantityModal(kind, id) {
+    const isProduct = kind === 'product';
+    const item = isProduct ? products.find(x => x.id === id) : services.find(x => x.id === id);
+    if (!item) return;
 
-function openServicePriceModal(service) {
-    const c = document.getElementById('service-modal');
-    c.querySelector('.modal-content').innerHTML = `
+    const inCart = cart.find(c => c.type === kind && c.id === id);
+    const currentQty = inCart ? inCart.quantity : 1;
+    const currentPrice = inCart ? inCart.price : item.price;
+    const stock = isProduct ? (item.stock || 0) : null;
+    const unit = isProduct ? (item.unit || 'piece') : 'service';
+    const isLow = isProduct && stock <= (item.stock_threshold || 0);
+
+    _qtyModalCtx = { kind, id, isProduct };
+
+    const modal = document.getElementById('service-modal');
+    modal.querySelector('.modal-content').innerHTML = `
         <div class="modal-header">
-            <div class="modal-title">${escapeHtml(service.name)}</div>
+            <div class="modal-title">${escapeHtml(item.name)}</div>
             <button class="modal-close" onclick="closeServiceModal()">✕</button>
         </div>
+
+        ${!isProduct ? `
+            <div class="form-group">
+                <label>Price (GHS)</label>
+                <input type="number" id="qty-modal-price" step="0.01" min="0" value="${currentPrice}"
+                       inputmode="decimal" style="font-size:16px;font-weight:600;">
+            </div>
+        ` : `
+            <div class="qty-modal-info">
+                <div class="qty-modal-price-label">${formatCurrency(currentPrice)} <span>per ${escapeHtml(unit)}</span></div>
+                ${stock !== null ? `<div class="qty-modal-stock ${isLow ? 'low' : ''}">${isLow ? '⚠️ ' : ''}${formatQty(stock)} in stock</div>` : ''}
+            </div>
+        `}
+
         <div class="form-group">
-            <label>Price (GHS)</label>
-            <input type="number" id="service-price-input" step="0.01" min="0" value="${service.price}" autofocus>
+            <label>Quantity</label>
+            <div class="qty-modal-input-row">
+                <button type="button" class="qty-modal-adjust" onclick="qtyModalAdjust(-1)">−</button>
+                <input type="number" id="qty-modal-input" min="0.01" step="0.01"
+                       value="${currentQty}" inputmode="decimal" class="qty-modal-input">
+                <button type="button" class="qty-modal-adjust" onclick="qtyModalAdjust(1)">+</button>
+            </div>
         </div>
-        <div style="display:flex;gap:10px;">
-            <button class="btn btn-outline btn-full" onclick="closeServiceModal()">Cancel</button>
-            <button class="btn btn-primary btn-full" onclick="confirmServiceAdd(${service.id})">Add to Cart</button>
-        </div>`;
-    c.classList.remove('hidden');
-    setTimeout(() => document.getElementById('service-price-input')?.select(), 100);
+
+        <div class="qty-modal-section-label">Set quantity</div>
+        <div class="qty-modal-presets">
+            ${[0.5, 1, 1.5, 2, 2.5, 5, 10, 20].map(v =>
+                `<button type="button" onclick="qtyModalSet(${v})">${v}</button>`
+            ).join('')}
+        </div>
+
+        <div class="qty-modal-section-label">Add to current</div>
+        <div class="qty-modal-presets">
+            <button type="button" class="half-btn" onclick="qtyModalAdd(0.5)">+ 0.5</button>
+            <button type="button" class="half-btn" onclick="qtyModalAdd(0.5)">+ ½</button>
+            <button type="button" class="half-btn" onclick="qtyModalAdd(1)">+ 1</button>
+            <button type="button" class="half-btn" onclick="qtyModalAdd(5)">+ 5</button>
+            <button type="button" class="half-btn" onclick="qtyModalAdd(10)">+ 10</button>
+        </div>
+
+        <div class="qty-modal-total">
+            <span>Subtotal</span>
+            <span id="qty-modal-total">${formatCurrency(currentQty * currentPrice)}</span>
+        </div>
+
+        <div class="qty-modal-actions">
+            ${inCart ? `<button type="button" class="btn btn-danger" onclick="qtyModalRemove()">🗑️ Remove</button>` : ''}
+            <button type="button" class="btn btn-success btn-full" onclick="qtyModalConfirm()">${inCart ? '✓ Update Cart' : '✓ Add to Cart'}</button>
+        </div>
+    `;
+
+    modal.classList.remove('hidden');
+
+    setTimeout(() => {
+        const qtyInput = document.getElementById('qty-modal-input');
+        const priceInput = document.getElementById('qty-modal-price');
+        if (qtyInput) {
+            qtyInput.focus();
+            qtyInput.select();
+            qtyInput.addEventListener('input', updateQtyModalTotal);
+            qtyInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') { e.preventDefault(); qtyModalConfirm(); }
+            });
+        }
+        if (priceInput) priceInput.addEventListener('input', updateQtyModalTotal);
+    }, 100);
 }
-function closeServiceModal() { document.getElementById('service-modal').classList.add('hidden'); }
-function confirmServiceAdd(id) {
-    const s = services.find(x => x.id === id);
-    const price = parseFloat(document.getElementById('service-price-input').value);
-    if (!s || isNaN(price) || price < 0) { showToast('Enter a valid price', 'error'); return; }
-    const existing = cart.find(c => c.type === 'service' && c.id === id);
-    if (existing) {
-        existing.quantity += 1;
+
+function updateQtyModalTotal() {
+    const qty = parseFloat(document.getElementById('qty-modal-input')?.value) || 0;
+    const priceInput = document.getElementById('qty-modal-price');
+    let price;
+    if (priceInput) {
+        price = parseFloat(priceInput.value) || 0;
     } else {
-        cart.push({ type: 'service', id, name: s.name, price, unit: 'service', quantity: 1 });
+        const item = _qtyModalCtx.isProduct
+            ? products.find(x => x.id === _qtyModalCtx.id)
+            : services.find(x => x.id === _qtyModalCtx.id);
+        price = item ? item.price : 0;
     }
+    const totalEl = document.getElementById('qty-modal-total');
+    if (totalEl) totalEl.textContent = formatCurrency(qty * price);
+}
+
+function qtyModalAdjust(delta) {
+    const inp = document.getElementById('qty-modal-input');
+    if (!inp) return;
+    const cur = parseFloat(inp.value) || 0;
+    const next = Math.max(0.5, +(cur + delta * 0.5).toFixed(3));
+    inp.value = next;
+    updateQtyModalTotal();
+}
+function qtyModalSet(val) {
+    const inp = document.getElementById('qty-modal-input');
+    if (!inp) return;
+    inp.value = val;
+    updateQtyModalTotal();
+}
+function qtyModalAdd(amount) {
+    const inp = document.getElementById('qty-modal-input');
+    if (!inp) return;
+    const cur = parseFloat(inp.value) || 0;
+    inp.value = +(cur + amount).toFixed(3);
+    updateQtyModalTotal();
+}
+function qtyModalConfirm() {
+    const kind = _qtyModalCtx.kind;
+    const id = _qtyModalCtx.id;
+    const isProduct = _qtyModalCtx.isProduct;
+    const qty = parseFloat(document.getElementById('qty-modal-input').value);
+
+    if (!qty || qty <= 0) { showToast('Enter a valid quantity', 'error'); return; }
+
+    const item = isProduct ? products.find(x => x.id === id) : services.find(x => x.id === id);
+    if (!item) return;
+
+    let price = item.price;
+    if (!isProduct) {
+        price = parseFloat(document.getElementById('qty-modal-price').value) || 0;
+        if (price < 0) { showToast('Enter a valid price', 'error'); return; }
+    }
+
+    if (isProduct) {
+        const stock = item.stock || 0;
+        if (qty > stock) {
+            showToast(`Only ${formatQty(stock)} in stock`, 'warning');
+            return;
+        }
+    }
+
+    const existing = cart.find(c => c.type === kind && c.id === id);
+    if (existing) {
+        existing.quantity = qty;
+        existing.price = price;
+    } else {
+        cart.push({
+            type: kind,
+            id,
+            name: item.name,
+            price,
+            unit: isProduct ? (item.unit || 'piece') : 'service',
+            stock: isProduct ? (item.stock || 0) : undefined,
+            quantity: qty
+        });
+    }
+
     closeServiceModal();
     afterCartChange();
+    showToast(`${item.name} · ${formatQty(qty)} × ${formatCurrency(price)}`, 'success', 2000);
 }
+function qtyModalRemove() {
+    const idx = cart.findIndex(c => c.type === _qtyModalCtx.kind && c.id === _qtyModalCtx.id);
+    if (idx !== -1) cart.splice(idx, 1);
+    closeServiceModal();
+    afterCartChange();
+    showToast('Removed from cart', 'info');
+}
+
+function closeServiceModal() { document.getElementById('service-modal').classList.add('hidden'); }
+
 function afterCartChange() { updateCartUI(); renderProductGrid(); }
 function updateCartUI() {
     const totalItems = cart.reduce((s, i) => s + i.quantity, 0);
@@ -537,7 +662,7 @@ function renderCartDrawer() {
         <div class="cart-item-row">
             <div class="cart-item-main">
                 <div class="cart-item-title">${escapeHtml(item.name)}</div>
-                <div class="cart-item-meta">${formatCurrency(item.price)} per ${escapeHtml(item.unit)}${item.type === 'product' && item.stock ? ` · In stock: ${formatQty(item.stock)}` : ''}</div>
+                <div class="cart-item-meta">${formatCurrency(item.price)} per ${escapeHtml(item.unit)}${item.type === 'product' && item.stock ? ` · Stock: ${formatQty(item.stock)}` : ''}</div>
 
                 <div class="cart-qty-controls">
                     <button onclick="changeQty(${i}, -${decStep})">−</button>
@@ -553,11 +678,14 @@ function renderCartDrawer() {
                     <button class="cart-qty-preset" onclick="addQty(${i}, 10)">+10</button>
                     <button class="cart-qty-preset" onclick="addQty(${i}, 20)">+20</button>
                     <button class="cart-qty-preset" onclick="addQty(${i}, 50)">+50</button>
-                    <button class="cart-qty-preset" onclick="removeFromCart(${i})" style="color:var(--danger);border-color:var(--danger);">🗑️</button>
                 </div>
             </div>
             <div class="cart-item-right">
                 <div class="cart-item-total">${formatCurrency(item.quantity * item.price)}</div>
+                <button class="cart-item-remove-btn" onclick="removeFromCart(${i})" aria-label="Remove item">
+                    <span class="remove-icon">🗑️</span>
+                    <span class="remove-label">Remove</span>
+                </button>
             </div>
         </div>`;
     }).join('');
@@ -596,7 +724,7 @@ function changeQty(i, delta) {
     const next = +(cart[i].quantity + delta).toFixed(3);
     if (next <= 0) { cart.splice(i, 1); }
     else if (cart[i].type === 'product' && cart[i].stock && next > cart[i].stock) {
-        showToast(`Only ${cart[i].stock} in stock`, 'warning'); return;
+        showToast(`Only ${formatQty(cart[i].stock)} in stock`, 'warning'); return;
     }
     else cart[i].quantity = next;
     afterCartChange();
@@ -606,7 +734,8 @@ function setQty(i, value) {
     const n = parseFloat(value);
     if (isNaN(n) || n <= 0) { cart.splice(i, 1); }
     else if (cart[i].type === 'product' && cart[i].stock && n > cart[i].stock) {
-        showToast(`Only ${cart[i].stock} in stock`, 'warning'); cart[i].quantity = cart[i].stock;
+        showToast(`Only ${formatQty(cart[i].stock)} in stock`, 'warning');
+        cart[i].quantity = cart[i].stock;
     }
     else cart[i].quantity = n;
     afterCartChange();
@@ -615,14 +744,20 @@ function addQty(i, amount) {
     if (!cart[i]) return;
     const next = +(cart[i].quantity + amount).toFixed(3);
     if (cart[i].type === 'product' && cart[i].stock && next > cart[i].stock) {
-        showToast(`Only ${cart[i].stock} in stock`, 'warning');
+        showToast(`Only ${formatQty(cart[i].stock)} in stock`, 'warning');
         cart[i].quantity = cart[i].stock;
     } else {
         cart[i].quantity = next;
     }
     afterCartChange();
 }
-function removeFromCart(i) { cart.splice(i, 1); afterCartChange(); }
+function removeFromCart(i) {
+    if (!cart[i]) return;
+    const name = cart[i].name;
+    cart.splice(i, 1);
+    afterCartChange();
+    showToast(`${name} removed`, 'info', 1500);
+}
 function setPayment(method) { selectedPayment = method; renderCartDrawer(); }
 
 async function completeSale() {
@@ -696,37 +831,43 @@ async function saveDraft() {
     else showToast(r.error || 'Failed to save draft', 'error');
 }
 
-// ==================== INVOICE ====================
+// ==================== INVOICE (Portrait Image) ====================
 async function showInvoice(saleId) {
     const r = await API.get(`/sales/${saleId}`);
     if (!r.success) return;
     const s = r.sale;
     openModal(`
-        <div class="invoice-container" id="invoice-printable">
-            <div class="invoice-header">
-                <div class="invoice-logo">🌲</div>
-                <div class="invoice-title">TIMBERPRO</div>
-                <div class="invoice-number">${escapeHtml(s.invoice_number)}</div>
+        <div class="invoice-wrapper">
+            <div class="invoice-container" id="invoice-printable">
+                <div class="invoice-header">
+                    <div class="invoice-logo">🌲</div>
+                    <div class="invoice-title">TIMBERPRO</div>
+                    <div class="invoice-tagline">Business Management</div>
+                    <div class="invoice-number">${escapeHtml(s.invoice_number)}</div>
+                </div>
+                <div style="margin-bottom:16px;">
+                    <div class="invoice-detail"><span>Date</span><span>${formatDateTime(s.created_at)}</span></div>
+                    <div class="invoice-detail"><span>Cashier</span><span>${escapeHtml(s.user_name || 'Staff')}</span></div>
+                    <div class="invoice-detail"><span>Customer</span><span>${escapeHtml(s.customer_name || 'Walk-in')}</span></div>
+                    <div class="invoice-detail"><span>Payment</span><span>${String(s.payment_method || '').toUpperCase()}</span></div>
+                </div>
+                <div class="invoice-items-block">
+                    ${(s.items || []).map(it => `<div class="invoice-item">
+                        <span>${escapeHtml(it.name)} × ${formatQty(it.quantity)}</span>
+                        <span>${formatCurrency(it.total_price)}</span>
+                    </div>`).join('')}
+                    <div class="invoice-total"><span>TOTAL</span><span>${formatCurrency(s.total_amount)}</span></div>
+                </div>
+                ${s.notes ? `<div class="sale-notes" style="margin-bottom:16px;">📝 ${escapeHtml(s.notes)}</div>` : ''}
+                <div class="invoice-footer">
+                    <p><strong>Thank you for your business!</strong></p>
+                    <p>TimberPro Management System</p>
+                </div>
             </div>
-            <div style="margin-bottom:16px;">
-                <div class="invoice-detail"><span>Date</span><span>${formatDateTime(s.created_at)}</span></div>
-                <div class="invoice-detail"><span>Cashier</span><span>${escapeHtml(s.user_name || 'Staff')}</span></div>
-                <div class="invoice-detail"><span>Customer</span><span>${escapeHtml(s.customer_name || 'Walk-in')}</span></div>
-                <div class="invoice-detail"><span>Payment</span><span>${String(s.payment_method || '').toUpperCase()}</span></div>
-            </div>
-            <div style="margin-bottom:16px;">
-                ${(s.items || []).map(it => `<div class="invoice-item">
-                    <span>${escapeHtml(it.name)} × ${formatQty(it.quantity)}</span>
-                    <span>${formatCurrency(it.total_price)}</span>
-                </div>`).join('')}
-                <div class="invoice-total"><span>TOTAL</span><span>${formatCurrency(s.total_amount)}</span></div>
-            </div>
-            ${s.notes ? `<div class="sale-notes" style="margin-bottom:16px;">📝 ${escapeHtml(s.notes)}</div>` : ''}
-            <div class="invoice-footer"><p>Thank you for your business!</p><p>TimberPro Management System</p></div>
         </div>
         <div class="invoice-actions">
             <button onclick="printInvoice()" class="btn btn-outline">🖨️ Print</button>
-            <button onclick="shareInvoiceAsImage()" class="btn btn-primary">📸 Image</button>
+            <button onclick="shareInvoiceAsImage()" class="btn btn-primary">📸 Save Image</button>
             <button onclick="closeModal()" class="btn btn-outline">Close</button>
         </div>
     `);
@@ -739,49 +880,79 @@ async function shareInvoiceAsImage() {
     if (typeof html2canvas === 'undefined') { showToast('Image library not loaded', 'error'); return; }
 
     showLoading(true);
+
+    // Temporarily remove overflow constraints so the full invoice is captured
+    const modalContent = el.closest('.modal-content');
+    const origOverflow = modalContent ? modalContent.style.overflow : '';
+    const origMaxHeight = modalContent ? modalContent.style.maxHeight : '';
+    if (modalContent) {
+        modalContent.style.overflow = 'visible';
+        modalContent.style.maxHeight = 'none';
+    }
+
     try {
+        // Small delay so layout settles before capture
+        await new Promise(r => setTimeout(r, 80));
+
+        const width = el.offsetWidth;
+        const height = el.offsetHeight;
+
         const canvas = await html2canvas(el, {
             scale: 2,
             backgroundColor: '#ffffff',
             useCORS: true,
-            logging: false
+            logging: false,
+            width: width,
+            height: height,
+            windowWidth: width,
+            windowHeight: height,
+            scrollX: 0,
+            scrollY: 0
         });
+
+        if (modalContent) {
+            modalContent.style.overflow = origOverflow;
+            modalContent.style.maxHeight = origMaxHeight;
+        }
         showLoading(false);
 
+        const fileName = `invoice-${Date.now()}.png`;
+
+        // Try Web Share (mobile-friendly) first
         if (navigator.canShare && window.File) {
             canvas.toBlob(async (blob) => {
-                const file = new File([blob], `invoice-${Date.now()}.png`, { type: 'image/png' });
+                const file = new File([blob], fileName, { type: 'image/png' });
                 if (navigator.canShare({ files: [file] })) {
                     try {
-                        await navigator.share({
-                            files: [file],
-                            title: 'Invoice',
-                            text: 'Sales invoice from TimberPro'
-                        });
+                        await navigator.share({ files: [file], title: 'Invoice', text: 'Sales invoice from TimberPro' });
                         return;
-                    } catch (e) {}
+                    } catch (e) { /* user cancelled, fall through */ }
                 }
-                downloadBlob(blob);
+                downloadBlob(blob, fileName);
             }, 'image/png');
         } else {
             const dataUrl = canvas.toDataURL('image/png');
             const a = document.createElement('a');
             a.href = dataUrl;
-            a.download = `invoice-${Date.now()}.png`;
+            a.download = fileName;
             document.body.appendChild(a); a.click(); a.remove();
             showToast('Invoice downloaded as image', 'success');
         }
     } catch (e) {
+        if (modalContent) {
+            modalContent.style.overflow = origOverflow;
+            modalContent.style.maxHeight = origMaxHeight;
+        }
         showLoading(false);
         console.error(e);
         showToast('Failed to generate image', 'error');
     }
 }
-function downloadBlob(blob) {
+function downloadBlob(blob, filename = `invoice-${Date.now()}.png`) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `invoice-${Date.now()}.png`;
+    a.download = filename;
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
     showToast('Invoice downloaded', 'success');
@@ -2249,7 +2420,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
-            navigator.serviceWorker.register('/sw.js').catch(e => console.error('SW registration failed', e));
+            navigator.serviceWorker.register('sw.js').catch(e => console.error('SW registration failed', e));
         });
     }
 

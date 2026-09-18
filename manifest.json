@@ -1,0 +1,27 @@
+{
+  "name": "TimberPro - Business Management",
+  "short_name": "TimberPro",
+  "description": "Timber business management system",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "background_color": "#1a5f4a",
+  "theme_color": "#1a5f4a",
+  "orientation": "portrait-primary",
+  "categories": ["business", "productivity", "finance"],
+  "icons": [
+    {
+      "src": "icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

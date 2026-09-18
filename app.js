@@ -1,7 +1,7 @@
-// ==================== TimberPro v2.3 — Frontend ====================
+// ==================== TimberPro v2.4 — Frontend ====================
 
 const API_BASE_URL = (localStorage.getItem('api_base_url')) || 'https://timberpro-api.kobayashifgk.workers.dev';
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.4.0';
 const DB_NAME = 'TimberProDB';
 const DB_VERSION = 3;
 
@@ -21,7 +21,7 @@ let orderItems = {};
 let dbReady = false;
 let deferredInstallPrompt = null;
 let currentCharts = {};
-let _qtyModalCtx = { kind: null, id: null, isProduct: false };
+let _qtyModalId = null;
 
 // ==================== OFFLINE DB ====================
 class OfflineDB {
@@ -394,8 +394,12 @@ function renderProductGrid() {
             ? `<div class="product-stock ${isLow ? 'low' : ''}">${isLow ? '⚠️ ' : ''}${stock} ${escapeHtml(item.unit || 'unit')}${stock !== 1 ? 's' : ''} left</div>`
             : `<div class="product-stock service">Service</div>`;
 
+        const clickHandler = isProduct
+            ? `openQuantityModal(${item.id})`
+            : `openServicePriceModalById(${item.id})`;
+
         return `
-            <div class="product-card ${inCart ? 'in-cart' : ''}" onclick="openQuantityModal('${entry.kind}', ${item.id})">
+            <div class="product-card ${inCart ? 'in-cart' : ''}" onclick="${clickHandler}">
                 <div class="product-icon">${isProduct ? '🪵' : '⚙️'}</div>
                 <div class="product-name">${escapeHtml(item.name)}</div>
                 <div class="product-price">${formatCurrency(item.price)}</div>
@@ -415,7 +419,7 @@ function renderProductGrid() {
 function cartIncrement(type, id) {
     const item = cart.find(c => c.type === type && c.id === id);
     if (!item) return;
-    const step = item.type === 'product' ? stepForUnit(item.unit) : 0.5;
+    const step = item.type === 'product' ? stepForUnit(item.unit) : 1;
     const next = +(item.quantity + step).toFixed(3);
     if (item.type === 'product' && item.stock && next > item.stock) {
         showToast(`Only ${formatQty(item.stock)} in stock`, 'warning'); return;
@@ -426,27 +430,28 @@ function cartIncrement(type, id) {
 function cartDecrement(type, id) {
     const idx = cart.findIndex(c => c.type === type && c.id === id);
     if (idx === -1) return;
-    const step = cart[idx].type === 'product' ? stepForUnit(cart[idx].unit) : 0.5;
+    const step = cart[idx].type === 'product' ? stepForUnit(cart[idx].unit) : 1;
     const next = +(cart[idx].quantity - step).toFixed(3);
     if (next <= 0) cart.splice(idx, 1);
     else cart[idx].quantity = next;
     afterCartChange();
 }
 
-// ---- ⭐ QUANTITY PICKER MODAL ----
-function openQuantityModal(kind, id) {
-    const isProduct = kind === 'product';
-    const item = isProduct ? products.find(x => x.id === id) : services.find(x => x.id === id);
+// ============================================
+// ⭐ PRODUCT QUANTITY PICKER MODAL (products only)
+// ============================================
+function openQuantityModal(productId) {
+    const item = products.find(x => x.id === productId);
     if (!item) return;
 
-    const inCart = cart.find(c => c.type === kind && c.id === id);
+    const inCart = cart.find(c => c.type === 'product' && c.id === productId);
     const currentQty = inCart ? inCart.quantity : 1;
-    const currentPrice = inCart ? inCart.price : item.price;
-    const stock = isProduct ? (item.stock || 0) : null;
-    const unit = isProduct ? (item.unit || 'piece') : 'service';
-    const isLow = isProduct && stock <= (item.stock_threshold || 0);
+    const stock = item.stock || 0;
+    const unit = item.unit || 'piece';
+    const isLow = stock <= (item.stock_threshold || 0);
+    const subtotal = currentQty * item.price;
 
-    _qtyModalCtx = { kind, id, isProduct };
+    _qtyModalId = productId;
 
     const modal = document.getElementById('service-modal');
     modal.querySelector('.modal-content').innerHTML = `
@@ -455,87 +460,77 @@ function openQuantityModal(kind, id) {
             <button class="modal-close" onclick="closeServiceModal()">✕</button>
         </div>
 
-        ${!isProduct ? `
-            <div class="form-group">
-                <label>Price (GHS)</label>
-                <input type="number" id="qty-modal-price" step="0.01" min="0" value="${currentPrice}"
-                       inputmode="decimal" style="font-size:16px;font-weight:600;">
+        <div class="qty-product-info">
+            <div class="qty-info-price">
+                <span class="qty-price-big">${formatCurrency(item.price)}</span>
+                <span class="qty-price-unit">per ${escapeHtml(unit)}</span>
             </div>
-        ` : `
-            <div class="qty-modal-info">
-                <div class="qty-modal-price-label">${formatCurrency(currentPrice)} <span>per ${escapeHtml(unit)}</span></div>
-                ${stock !== null ? `<div class="qty-modal-stock ${isLow ? 'low' : ''}">${isLow ? '⚠️ ' : ''}${formatQty(stock)} in stock</div>` : ''}
-            </div>
-        `}
-
-        <div class="form-group">
-            <label>Quantity</label>
-            <div class="qty-modal-input-row">
-                <button type="button" class="qty-modal-adjust" onclick="qtyModalAdjust(-1)">−</button>
-                <input type="number" id="qty-modal-input" min="0.01" step="0.01"
-                       value="${currentQty}" inputmode="decimal" class="qty-modal-input">
-                <button type="button" class="qty-modal-adjust" onclick="qtyModalAdjust(1)">+</button>
+            <div class="qty-info-stock ${isLow ? 'low' : ''}">
+                ${isLow ? '⚠️ ' : '📦 '}${formatQty(stock)} in stock
             </div>
         </div>
 
-        <div class="qty-modal-section-label">Set quantity</div>
-        <div class="qty-modal-presets">
-            ${[0.5, 1, 1.5, 2, 2.5, 5, 10, 20].map(v =>
-                `<button type="button" onclick="qtyModalSet(${v})">${v}</button>`
-            ).join('')}
+        <div class="qty-picker-wrap">
+            <button type="button" class="qty-picker-btn" onclick="qtyModalAdjust(-1)">−</button>
+            <input type="number" id="qty-modal-input" min="0.01" step="0.01"
+                   value="${currentQty}" inputmode="decimal" class="qty-picker-input">
+            <button type="button" class="qty-picker-btn" onclick="qtyModalAdjust(1)">+</button>
+        </div>
+        <div class="qty-picker-hint">Tap + or − to adjust by ½ · Type for custom amount</div>
+
+        <div class="qty-group">
+            <div class="qty-group-title"><span class="qty-dot qty-dot-blue"></span>Quick set</div>
+            <div class="qty-preset-grid">
+                ${[0.5, 1, 1.5, 2, 2.5, 5, 10, 20].map(v =>
+                    `<button type="button" class="qty-preset-btn" onclick="qtyModalSet(${v})">${v}</button>`
+                ).join('')}
+            </div>
         </div>
 
-        <div class="qty-modal-section-label">Add to current</div>
-        <div class="qty-modal-presets">
-            <button type="button" class="half-btn" onclick="qtyModalAdd(0.5)">+ 0.5</button>
-            <button type="button" class="half-btn" onclick="qtyModalAdd(0.5)">+ ½</button>
-            <button type="button" class="half-btn" onclick="qtyModalAdd(1)">+ 1</button>
-            <button type="button" class="half-btn" onclick="qtyModalAdd(5)">+ 5</button>
-            <button type="button" class="half-btn" onclick="qtyModalAdd(10)">+ 10</button>
+        <div class="qty-group">
+            <div class="qty-group-title"><span class="qty-dot qty-dot-orange"></span>Add to current</div>
+            <div class="qty-preset-grid">
+                <button type="button" class="qty-add-btn highlight" onclick="qtyModalAdd(0.5)">+ ½</button>
+                <button type="button" class="qty-add-btn" onclick="qtyModalAdd(1)">+ 1</button>
+                <button type="button" class="qty-add-btn" onclick="qtyModalAdd(5)">+ 5</button>
+                <button type="button" class="qty-add-btn" onclick="qtyModalAdd(10)">+ 10</button>
+            </div>
         </div>
 
-        <div class="qty-modal-total">
-            <span>Subtotal</span>
-            <span id="qty-modal-total">${formatCurrency(currentQty * currentPrice)}</span>
+        <div class="qty-total-bar">
+            <span class="qty-total-label">Subtotal</span>
+            <span class="qty-total-value" id="qty-modal-total">${formatCurrency(subtotal)}</span>
         </div>
 
         <div class="qty-modal-actions">
             ${inCart ? `<button type="button" class="btn btn-danger" onclick="qtyModalRemove()">🗑️ Remove</button>` : ''}
-            <button type="button" class="btn btn-success btn-full" onclick="qtyModalConfirm()">${inCart ? '✓ Update Cart' : '✓ Add to Cart'}</button>
+            <button type="button" class="btn btn-success" onclick="qtyModalConfirm()">
+                ${inCart ? '✓ Update Cart' : '✓ Add to Cart'}
+            </button>
         </div>
     `;
 
     modal.classList.remove('hidden');
 
     setTimeout(() => {
-        const qtyInput = document.getElementById('qty-modal-input');
-        const priceInput = document.getElementById('qty-modal-price');
-        if (qtyInput) {
-            qtyInput.focus();
-            qtyInput.select();
-            qtyInput.addEventListener('input', updateQtyModalTotal);
-            qtyInput.addEventListener('keydown', (e) => {
+        const inp = document.getElementById('qty-modal-input');
+        if (inp) {
+            inp.focus();
+            inp.select();
+            inp.addEventListener('input', updateQtyModalTotal);
+            inp.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter') { e.preventDefault(); qtyModalConfirm(); }
             });
         }
-        if (priceInput) priceInput.addEventListener('input', updateQtyModalTotal);
     }, 100);
 }
 
 function updateQtyModalTotal() {
+    const item = products.find(x => x.id === _qtyModalId);
+    if (!item) return;
     const qty = parseFloat(document.getElementById('qty-modal-input')?.value) || 0;
-    const priceInput = document.getElementById('qty-modal-price');
-    let price;
-    if (priceInput) {
-        price = parseFloat(priceInput.value) || 0;
-    } else {
-        const item = _qtyModalCtx.isProduct
-            ? products.find(x => x.id === _qtyModalCtx.id)
-            : services.find(x => x.id === _qtyModalCtx.id);
-        price = item ? item.price : 0;
-    }
     const totalEl = document.getElementById('qty-modal-total');
-    if (totalEl) totalEl.textContent = formatCurrency(qty * price);
+    if (totalEl) totalEl.textContent = formatCurrency(qty * item.price);
 }
 
 function qtyModalAdjust(delta) {
@@ -560,60 +555,79 @@ function qtyModalAdd(amount) {
     updateQtyModalTotal();
 }
 function qtyModalConfirm() {
-    const kind = _qtyModalCtx.kind;
-    const id = _qtyModalCtx.id;
-    const isProduct = _qtyModalCtx.isProduct;
-    const qty = parseFloat(document.getElementById('qty-modal-input').value);
-
-    if (!qty || qty <= 0) { showToast('Enter a valid quantity', 'error'); return; }
-
-    const item = isProduct ? products.find(x => x.id === id) : services.find(x => x.id === id);
+    const item = products.find(x => x.id === _qtyModalId);
     if (!item) return;
+    const qty = parseFloat(document.getElementById('qty-modal-input').value);
+    if (!qty || qty <= 0) { showToast('Enter a valid quantity', 'error'); return; }
+    const stock = item.stock || 0;
+    if (qty > stock) { showToast(`Only ${formatQty(stock)} in stock`, 'warning'); return; }
 
-    let price = item.price;
-    if (!isProduct) {
-        price = parseFloat(document.getElementById('qty-modal-price').value) || 0;
-        if (price < 0) { showToast('Enter a valid price', 'error'); return; }
-    }
-
-    if (isProduct) {
-        const stock = item.stock || 0;
-        if (qty > stock) {
-            showToast(`Only ${formatQty(stock)} in stock`, 'warning');
-            return;
-        }
-    }
-
-    const existing = cart.find(c => c.type === kind && c.id === id);
+    const existing = cart.find(c => c.type === 'product' && c.id === item.id);
     if (existing) {
         existing.quantity = qty;
-        existing.price = price;
     } else {
         cart.push({
-            type: kind,
-            id,
-            name: item.name,
-            price,
-            unit: isProduct ? (item.unit || 'piece') : 'service',
-            stock: isProduct ? (item.stock || 0) : undefined,
-            quantity: qty
+            type: 'product', id: item.id, name: item.name,
+            price: item.price, unit: item.unit || 'piece',
+            stock, quantity: qty
         });
     }
-
     closeServiceModal();
     afterCartChange();
-    showToast(`${item.name} · ${formatQty(qty)} × ${formatCurrency(price)}`, 'success', 2000);
+    showToast(`${item.name} · ${formatQty(qty)} × ${formatCurrency(item.price)}`, 'success', 2000);
 }
 function qtyModalRemove() {
-    const idx = cart.findIndex(c => c.type === _qtyModalCtx.kind && c.id === _qtyModalCtx.id);
+    const idx = cart.findIndex(c => c.type === 'product' && c.id === _qtyModalId);
     if (idx !== -1) cart.splice(idx, 1);
     closeServiceModal();
     afterCartChange();
     showToast('Removed from cart', 'info');
 }
 
+// ============================================
+// ⭐ SERVICE PRICE MODAL (old, unchanged)
+// ============================================
+function openServicePriceModalById(id) {
+    const s = services.find(x => x.id === id);
+    if (s) openServicePriceModal(s);
+}
+
+function openServicePriceModal(service) {
+    const c = document.getElementById('service-modal');
+    c.querySelector('.modal-content').innerHTML = `
+        <div class="modal-header">
+            <div class="modal-title">${escapeHtml(service.name)}</div>
+            <button class="modal-close" onclick="closeServiceModal()">✕</button>
+        </div>
+        <div class="form-group">
+            <label>Price (GHS)</label>
+            <input type="number" id="service-price-input" step="0.01" min="0" value="${service.price}" autofocus>
+        </div>
+        <div style="display:flex;gap:10px;">
+            <button class="btn btn-outline btn-full" onclick="closeServiceModal()">Cancel</button>
+            <button class="btn btn-primary btn-full" onclick="confirmServiceAdd(${service.id})">Add to Cart</button>
+        </div>`;
+    c.classList.remove('hidden');
+    setTimeout(() => document.getElementById('service-price-input')?.select(), 100);
+}
+
+function confirmServiceAdd(id) {
+    const s = services.find(x => x.id === id);
+    const price = parseFloat(document.getElementById('service-price-input').value);
+    if (!s || isNaN(price) || price < 0) { showToast('Enter a valid price', 'error'); return; }
+    const existing = cart.find(c => c.type === 'service' && c.id === id);
+    if (existing) {
+        existing.quantity += 1;
+    } else {
+        cart.push({ type: 'service', id, name: s.name, price, unit: 'service', quantity: 1 });
+    }
+    closeServiceModal();
+    afterCartChange();
+}
+
 function closeServiceModal() { document.getElementById('service-modal').classList.add('hidden'); }
 
+// ==================== CART ====================
 function afterCartChange() { updateCartUI(); renderProductGrid(); }
 function updateCartUI() {
     const totalItems = cart.reduce((s, i) => s + i.quantity, 0);
@@ -831,7 +845,7 @@ async function saveDraft() {
     else showToast(r.error || 'Failed to save draft', 'error');
 }
 
-// ==================== INVOICE (Portrait Image) ====================
+// ==================== INVOICE ====================
 async function showInvoice(saleId) {
     const r = await API.get(`/sales/${saleId}`);
     if (!r.success) return;
@@ -881,7 +895,6 @@ async function shareInvoiceAsImage() {
 
     showLoading(true);
 
-    // Temporarily remove overflow constraints so the full invoice is captured
     const modalContent = el.closest('.modal-content');
     const origOverflow = modalContent ? modalContent.style.overflow : '';
     const origMaxHeight = modalContent ? modalContent.style.maxHeight : '';
@@ -891,7 +904,6 @@ async function shareInvoiceAsImage() {
     }
 
     try {
-        // Small delay so layout settles before capture
         await new Promise(r => setTimeout(r, 80));
 
         const width = el.offsetWidth;
@@ -918,7 +930,6 @@ async function shareInvoiceAsImage() {
 
         const fileName = `invoice-${Date.now()}.png`;
 
-        // Try Web Share (mobile-friendly) first
         if (navigator.canShare && window.File) {
             canvas.toBlob(async (blob) => {
                 const file = new File([blob], fileName, { type: 'image/png' });
@@ -926,7 +937,7 @@ async function shareInvoiceAsImage() {
                     try {
                         await navigator.share({ files: [file], title: 'Invoice', text: 'Sales invoice from TimberPro' });
                         return;
-                    } catch (e) { /* user cancelled, fall through */ }
+                    } catch (e) {}
                 }
                 downloadBlob(blob, fileName);
             }, 'image/png');
